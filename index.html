@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>Azure Space Demo - 星鏈衛星即時追蹤</title>
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.114/Build/Cesium/Cesium.js"></script>
+    <link href="https://cesium.com/downloads/cesiumjs/releases/1.114/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/satellite.js/5.0.0/satellite.min.js"></script>
+    <style>
+        html, body, #cesiumContainer { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
+        #ui { position: absolute; top: 15px; left: 15px; background: rgba(0, 0, 0, 0.8); color: #00ffcc; padding: 15px; z-index: 10; border-radius: 8px; font-family: monospace; box-shadow: 0 0 10px rgba(0,255,204,0.5); }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h2>🛰️ Starlink 即時監控網</h2>
+        <p id="status">正在從 Azure Functions 載入軌道資料...</p>
+        <p>追蹤數量: <span id="count">0</span></p>
+    </div>
+    <div id="cesiumContainer"></div>
+
+    <script>
+        // 1. 填入你的 Cesium Ion Token (免費申請)
+        Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI3MmYxOGNkOC1hMzExLTRkNGMtOWM5Mi1kMGRlMjQ0ZDhiYzgiLCJpZCI6NDAxNjgxLCJpYXQiOjE3NzMyMDk1OTB9.PuvrzFuwjBxaGYyIi9BbUVYmJ4UtQoLjd1vMpSNsp7Q';
+
+        const viewer = new Cesium.Viewer('cesiumContainer', {
+            //terrainProvider: Cesium.createWorldTerrain(),
+            baseLayerPicker: false, // 隱藏預設控制項讓畫面更乾淨
+            timeline: false,
+            animation: false
+        });
+
+        // 儲存衛星實體與軌道計算物件的陣列
+        let activeSatellites = [];
+
+        // 2. 呼叫 Azure Functions API
+        // 注意：本地測試時 API 路徑通常是 http://localhost:7071/api/getStarlink
+        // 部署到 Azure Static Web Apps 後，會自動對應為 /api/getStarlink
+        const apiUrl = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
+                       ? 'http://localhost:7071/api/getStarlink' 
+                       : '/api/getStarlink';
+
+        fetch(apiUrl)
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('status').innerText = '✅ 軌道資料載入完成，正在進行物理運算...';
+                document.getElementById('status').style.color = '#00ff00';
+                document.getElementById('count').innerText = data.length;
+
+                // 3. 建立衛星實體
+                data.forEach(sat => {
+                    const satrec = satellite.twoline2satrec(sat.tle1, sat.tle2);
+                    
+                    const entity = viewer.entities.add({
+                        name: sat.name,
+                        point: { 
+                            pixelSize: 5, 
+                            color: Cesium.Color.CYAN, 
+                            outlineColor: Cesium.Color.WHITE, 
+                            outlineWidth: 1 
+                        },
+                        description: `
+                            <p>軌道參數 1: ${sat.tle1}</p>
+                            <p>軌道參數 2: ${sat.tle2}</p>
+                        `
+                    });
+
+                    activeSatellites.push({ entity: entity, satrec: satrec });
+                });
+            })
+            .catch(err => {
+                document.getElementById('status').innerText = '❌ API 連線失敗';
+                document.getElementById('status').style.color = 'red';
+                console.error('Fetch error:', err);
+            });
+
+        // 4. 設定高頻定時器 (每 50 毫秒更新一次畫面)
+        setInterval(() => {
+            const now = new Date();
+            const gmst = satellite.gstime(now);
+
+            activeSatellites.forEach(satItem => {
+                try {
+                    const positionAndVelocity = satellite.propagate(satItem.satrec, now);
+                    const positionEci = positionAndVelocity.position;
+
+                    if (positionEci) {
+                        const positionGd = satellite.eciToGeodetic(positionEci, gmst);
+                        const longitude = satellite.degreesLong(positionGd.longitude);
+                        const latitude = satellite.degreesLat(positionGd.latitude);
+                        const altitude = positionGd.height * 1000;
+
+                        satItem.entity.position = Cesium.Cartesian3.fromDegrees(longitude, latitude, altitude);
+                    }
+                } catch (e) {
+                    // 忽略無效的計算
+                }
+            });
+        }, 50);
+    </script>
+</body>
+</html>
